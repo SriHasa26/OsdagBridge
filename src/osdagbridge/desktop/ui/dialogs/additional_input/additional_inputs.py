@@ -2,6 +2,7 @@
 Additional Inputs Widget for Highway Bridge Design
 Provides detailed input fields for manual bridge parameter definition
 """
+import functools
 from copy import deepcopy
 
 from PySide6.QtWidgets import (
@@ -26,6 +27,21 @@ from osdagbridge.desktop.ui.dialogs.additional_input.ui_builder.common_ui_builde
 # =================================================================================
 #   MAIN IMPLEMENTATION
 # =================================================================================
+
+def _programmatic_update(method):
+    """Mark a method whose widget/dict changes come from code, not from the user.
+
+    Anything written while it runs must not set AdditionalInputs.is_modified.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        self._suppress_modified += 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._suppress_modified -= 1
+    return wrapper
+
 
 class AdditionalInputs(QDialog):
     """Main dialog for Additional Inputs with tabbed interface"""
@@ -57,6 +73,11 @@ class AdditionalInputs(QDialog):
  
         # Store all Compute functions to be called at Design
         self._compute_functions = []
+
+        # True once the user edits something that has not been saved yet.
+        # Programmatic fills are excluded (see _programmatic_update / _mark_modified).
+        self.is_modified = False
+        self._suppress_modified = 0
 
         self.setObjectName("AdditionalInputs")
         self.setMinimumSize(900, 520)
@@ -228,6 +249,7 @@ class AdditionalInputs(QDialog):
             return True
         return super().eventFilter(obj, event)
 
+    @_programmatic_update
     def set_input_dictionary(self, input_dict: dict):  # lifecycle: sets default/working dicts and wires END_CONNECTORS on first open
         self.default_input_dict = input_dict
         self.working_input_dict = deepcopy(input_dict)
@@ -245,6 +267,9 @@ class AdditionalInputs(QDialog):
             self.interacted_first = False
             from osdagbridge.core.bridge_types.plate_girder.ui_fields_additional_input import END_CONNECTORS
             UIBuilder.wire_end_connectors(END_CONNECTORS, ai=self)
+
+        # Fresh copy of the committed inputs: nothing is unsaved yet.
+        self.is_modified = False
 
     def set_defaults(self) -> None:  # lifecycle: populates all widgets from working_input_dict; called at init time only
         """
@@ -300,6 +325,7 @@ class AdditionalInputs(QDialog):
             mode = str(self.working_input_dict.get(ctrl_id) or "")
             adaptive.switch_mode(mode)
 
+    @_programmatic_update
     def design_mode_trigger(self, mode_str: str):  # lifecycle: syncs Optimized/Custom mode across all affected widgets and AdaptiveWidgets
         # Ensures IS Section hidden and welded fields shown correctly on first open
         gd_type_w = self.findChild(QComboBox, KEY_MP_GIRDER_TYPE)
@@ -497,6 +523,7 @@ class AdditionalInputs(QDialog):
 
             self.working_input_dict[name] = value
 
+    @_programmatic_update
     def showEvent(self, event):  # Qt event: refreshes active sub-tabs when dialog is shown or reopened
         super().showEvent(event)
         from PySide6.QtWidgets import QTabWidget
@@ -517,6 +544,7 @@ class AdditionalInputs(QDialog):
             self._save_stiffener_member_data(combo.currentText().strip())
 
         self.default_input_dict.update(self.working_input_dict)
+        self.is_modified = False  # everything on screen is now committed
         from osdagbridge.desktop.ui.docks.cad_cross_section import CrossSectionCADWidget
         cad = self.findChild(CrossSectionCADWidget, KEY_TS_CAD_PREVIEW)
         if cad:
@@ -597,7 +625,12 @@ class AdditionalInputs(QDialog):
 
         self._update_additional_input_cad()
 
+    def _mark_modified(self):  # utility: flags unsaved changes, but only for edits made by the user on the open dialog
+        if self._suppress_modified == 0 and self.isVisible():
+            self.is_modified = True
+
     def _update_input_dict(self, key: str, value: str):  # utility: writes a value to working_input_dict, falling back to default if empty
+        self._mark_modified()
         if value is None or value == "":
             self.working_input_dict[key] = self.default_input_dict.get(key)
         else:
