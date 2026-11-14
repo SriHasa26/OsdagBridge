@@ -937,3 +937,56 @@ def solve_extend_basic_input_dict(basic_input_dict: dict) -> None:
     # Update Dynamic per-girder/member keys
     _on_no_of_girders_changed(basic_input_dict)
 
+def apply_cad_parameter_edit(input_dict: dict, key: str, text: str) -> list:
+    """Write a value edited on the 2D CAD into input_dict and re-derive what depends on it.
+
+    - carriageway width: full re-solve, exactly like editing it in the input dock
+    - girder spacing:    girder count stays fixed; overhang and overall width are re-derived
+    - span:              bracing spacing = span / (no. of cross bracings + 1), per-pair spacings refreshed
+    - deck thickness:    nothing depends on it
+
+    Works on a copy and only commits on success. Returns the keys whose value changed.
+    Raises ValueError (message is shown to the user) if the layout cannot be solved.
+    """
+    from .initial_sizing import BridgeConfigurationSolver
+
+    trial = dict(input_dict)
+    trial[key] = text
+
+    if key == KEY_CARRIAGEWAY_WIDTH:
+        solve_extend_basic_input_dict(trial)
+
+    elif key == KEY_TS_GIRDER_SPACING:
+        if not trial.get(KEY_TS_NO_OF_GIRDERS):
+            solve_extend_basic_input_dict(trial)   # layout was never solved: get the girder count first
+        solver = BridgeConfigurationSolver(
+            carriageway_width=float(trial[KEY_CARRIAGEWAY_WIDTH]),
+            crash_barrier_width=float(trial[KEY_CB_WIDTH]),
+            footpath_width=float(trial.get(KEY_TS_FOOTPATH_WIDTH) or 0.0),
+            railing_width=float(trial.get(KEY_RL_WIDTH) or 0.0),
+            median_width=float(trial.get(KEY_MD_WIDTH) or 0.0),
+            n_footpaths=int(trial.get(KEY_TS_NO_OF_FOOTPATHS) or 0),
+        )
+        result = solver._solve_layout(
+            no_of_girders=int(float(trial[KEY_TS_NO_OF_GIRDERS])),
+            girder_spacing=float(text),
+            changed_field="spacing",
+        )
+        trial.update({
+            KEY_TS_OVERALL_WIDTH:  result.overall_width,
+            KEY_TS_GIRDER_SPACING: result.girder_spacing,
+            KEY_TS_DECK_OVERHANG:  result.deck_overhang,
+        })
+
+    elif key == KEY_SPAN:
+        # Same formula as AdditionalInputs._on_cb_spacing_computed
+        no_of_bracings = max(1, int(float(str(trial.get(KEY_MP_CB_NO_OF_CROSS_BRACINGS) or 1))))
+        trial[KEY_MP_CB_SPACING] = f"{float(text) / (no_of_bracings + 1):.3f}"
+        n_girders = int(float(str(trial.get(KEY_TS_NO_OF_GIRDERS) or 0)))
+        if n_girders >= 2:
+            extend_cb_dynamic_keys(trial, n_girders, no_of_bracings)
+
+    changed = [k for k, v in trial.items() if input_dict.get(k) != v]
+    input_dict.update(trial)
+    return changed
+
