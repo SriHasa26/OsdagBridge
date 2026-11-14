@@ -54,19 +54,24 @@ _CUSTOM_DEPENDENT_FIELDS = {
 
 @functools.lru_cache(maxsize=1)
 def _schema_labels() -> dict:
-    """Map every field id in ADDITIONAL_INPUTS_SCHEMA to its display label."""
+    """Map every field id in ADDITIONAL_INPUTS_SCHEMA to (display label, section label).
+
+    The section is the nearest enclosing tab/sub-tab dict (the ones that hold "rows").
+    """
     labels = {}
 
-    def walk(node):
+    def walk(node, section=""):
         if isinstance(node, dict):
+            if "rows" in node and isinstance(node.get("label"), str):
+                section = node["label"]
             field_id, label = node.get("id"), node.get("label")
             if isinstance(field_id, str) and isinstance(label, str):
-                labels.setdefault(field_id, label)
+                labels.setdefault(field_id, (label, section))
             for child in node.values():
-                walk(child)
+                walk(child, section)
         elif isinstance(node, (list, tuple)):
             for child in node:
-                walk(child)
+                walk(child, section)
 
     walk(ADDITIONAL_INPUTS_SCHEMA)
     return labels
@@ -83,6 +88,21 @@ def _clean_param_name(label: str) -> str:
     text = text.rstrip(":").strip()
     text = re.sub(r"\s*\([^()]*\)$", "", text)      # trailing unit, e.g. "(kN/m)"
     return text.rstrip(":").strip()
+
+
+def _param_name(field_id: str) -> str:
+    """Readable parameter name for a field id: "Gust Factor, G", "Crash Barrier Width".
+
+    A cleaned label that several fields share (Width, Height, Load, ...) is prefixed
+    with its tab/sub-tab label so the name is unambiguous.
+    """
+    labels = _schema_labels()
+    label, section = labels.get(field_id, ("", ""))
+    name = _clean_param_name(label)
+    if not name:
+        return field_id.rsplit(".", 1)[-1]
+    shared = sum(1 for other, _ in labels.values() if _clean_param_name(other) == name) > 1
+    return f"{_clean_param_name(section)} {name}".strip() if shared else name
 
 
 def _programmatic_update(method):
@@ -677,7 +697,7 @@ class AdditionalInputs(QDialog):
 
         widget, field_id = found
         self._reveal_field(widget)
-        name = _clean_param_name(_schema_labels().get(field_id, "")) or field_id.rsplit(".", 1)[-1]
+        name = _param_name(field_id)
         CustomMessageBox(
             title="Error",
             text=f"Error: The custom value for '{name}' cannot be empty.",
