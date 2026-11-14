@@ -588,6 +588,35 @@ class AdditionalInputs(QDialog):
             if hasattr(tab_widget, "refresh_active_tab"):
                 tab_widget.refresh_active_tab()
 
+    # ── Closing with unsaved changes ─────────────────────────────────────────────
+
+    def _confirm_discard(self) -> bool:  # utility: True if the dialog may close (nothing unsaved, or the user chose Discard)
+        if not self.is_modified:
+            return True
+
+        result = CustomMessageBox(
+            title="Unsaved Changes",
+            text="You have unsaved changes. Closing this window will discard them. Do you want to proceed?",
+            buttons=["Discard", "Cancel"],
+            dialogType=MessageBoxType.Warning,
+        ).exec()
+        if result == "Discard":
+            # Reset so the reject() that closeEvent triggers below does not ask a second time.
+            # The edits themselves vanish on the next open (set_input_dictionary reloads).
+            self.is_modified = False
+            return True
+        return False  # Cancel, or the message box was closed with its X
+
+    def closeEvent(self, event):  # Qt event: title-bar X (QWidget.close) goes through here
+        if not self._confirm_discard():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def reject(self):  # Qt slot: Esc key (and QDialog.closeEvent) end up here
+        if self._confirm_discard():
+            super().reject()
+
     # ── Dialog Persistence ───────────────────────────────────────────────────────
 
     def _in_disabled_tab(self, widget) -> bool:  # utility: True if widget sits on a tab page that is switched off (e.g. Median without a median)
