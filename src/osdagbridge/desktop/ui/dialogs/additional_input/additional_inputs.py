@@ -3,11 +3,13 @@ Additional Inputs Widget for Highway Bridge Design
 Provides detailed input fields for manual bridge parameter definition
 """
 import functools
+import html
+import re
 from copy import deepcopy
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QTabBar, QLabel, QLineEdit,
-    QComboBox, QPushButton, QCheckBox, QSizePolicy,
+    QComboBox, QPushButton, QCheckBox, QSizePolicy, QScrollArea,
     QDialog, QSizePolicy, QSizeGrip,
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QEvent
@@ -27,6 +29,61 @@ from osdagbridge.desktop.ui.dialogs.additional_input.ui_builder.common_ui_builde
 # =================================================================================
 #   MAIN IMPLEMENTATION
 # =================================================================================
+
+# ── Custom-value validation (used by AdditionalInputs._save_inputs) ───────────────
+
+# Option text that unlocks a user-typed value
+_CUSTOM_OPTION = "Custom"
+
+# UIBuilder names the two widgets of a TYPE_MODE_LINE field "<field id>.mode" (combo)
+# and "<field id>.value" (line edit)
+_MODE_SUFFIX  = ".mode"
+_VALUE_SUFFIX = ".value"
+
+# Plain comboboxes whose "Custom" choice unlocks separate line edits
+# (see on_crash_barrier_type_changed, on_median_type_changed, compute_railing_values, ...).
+# Only the fields that are enabled and visible for "Custom" are checked.
+_CUSTOM_DEPENDENT_FIELDS = {
+    KEY_CB_TYPE:      [KEY_CB_DENSITY, KEY_CB_WIDTH, KEY_CB_HEIGHT, KEY_CB_AREA, KEY_CB_LOAD],
+    KEY_MD_TYPE:      [KEY_MD_DENSITY, KEY_MD_WIDTH, KEY_MD_HEIGHT, KEY_MD_AREA, KEY_MD_LOAD],
+    KEY_RL_TYPE:      [KEY_RL_WIDTH, KEY_RL_HEIGHT],
+    KEY_RL_LOAD_MODE: [KEY_RL_LOAD_VALUE],
+    KEY_WC_MATERIAL:  [KEY_WC_DENSITY],
+}
+
+
+@functools.lru_cache(maxsize=1)
+def _schema_labels() -> dict:
+    """Map every field id in ADDITIONAL_INPUTS_SCHEMA to its display label."""
+    labels = {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            field_id, label = node.get("id"), node.get("label")
+            if isinstance(field_id, str) and isinstance(label, str):
+                labels.setdefault(field_id, label)
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child)
+
+    walk(ADDITIONAL_INPUTS_SCHEMA)
+    return labels
+
+
+def _clean_param_name(label: str) -> str:
+    """Turn a schema label into a plain parameter name for messages.
+
+    "Drag Coefficient, C<sub>D</sub>" -> "Drag Coefficient, CD"
+    "Width (m):"                      -> "Width"
+    """
+    text = re.sub(r"<[^>]+>", "", label)            # HTML tags such as <sub>
+    text = " ".join(html.unescape(text).split())    # entities, line breaks, extra spaces
+    text = text.rstrip(":").strip()
+    text = re.sub(r"\s*\([^()]*\)$", "", text)      # trailing unit, e.g. "(kN/m)"
+    return text.rstrip(":").strip()
+
 
 def _programmatic_update(method):
     """Mark a method whose widget/dict changes come from code, not from the user.
@@ -533,7 +590,79 @@ class AdditionalInputs(QDialog):
 
     # ── Dialog Persistence ───────────────────────────────────────────────────────
 
+    def _in_disabled_tab(self, widget) -> bool:  # utility: True if widget sits on a tab page that is switched off (e.g. Median without a median)
+        for tab_widget in self.findChildren(QTabWidget):
+            for i in range(tab_widget.count()):
+                page = tab_widget.widget(i)
+                if (page is widget or page.isAncestorOf(widget)) and not tab_widget.isTabEnabled(i):
+                    return True
+        return False
+
+    def _find_empty_custom_field(self):  # utility: first (widget, field id) set to "Custom" whose value box is empty, or None
+        """
+        Reads the widgets (not working_input_dict: _update_input_dict silently replaces
+        an empty value with its default) of every tab, in tab order. Two patterns:
+        - TYPE_MODE_LINE: "<id>.mode" combo == Custom  -> "<id>.value" line edit
+        - plain combos listed in _CUSTOM_DEPENDENT_FIELDS -> their dependent line edits
+        Disabled widgets (locked dialog, inactive condition) and disabled tabs are skipped.
+        """
+        for i in range(self.tabs.count()):
+            for combo in self.tabs.widget(i).findChildren(QComboBox):
+                if combo.currentText() != _CUSTOM_OPTION or not combo.isEnabled():
+                    continue
+                if self._in_disabled_tab(combo):
+                    continue
+
+                name = combo.objectName()
+                if name.endswith(_MODE_SUFFIX):
+                    field_id = name[:-len(_MODE_SUFFIX)]
+                    candidates = [(self.findChild(QLineEdit, field_id + _VALUE_SUFFIX), field_id)]
+                else:
+                    candidates = [(self.findChild(QLineEdit, key), key)
+                                  for key in _CUSTOM_DEPENDENT_FIELDS.get(name, [])]
+
+                for widget, field_id in candidates:
+                    if widget is None or not widget.isEnabled() or widget.isHidden():
+                        continue
+                    if self._in_disabled_tab(widget):
+                        continue
+                    if not widget.text().strip():
+                        return widget, field_id
+        return None
+
+    def _reveal_field(self, widget) -> None:  # utility: switches every enclosing tab to the field, scrolls to it and focuses it
+        for tab_widget in self.findChildren(QTabWidget):
+            for i in range(tab_widget.count()):
+                page = tab_widget.widget(i)
+                if page is widget or page.isAncestorOf(widget):
+                    tab_widget.setCurrentIndex(i)
+        for area in self.findChildren(QScrollArea):
+            if area.widget() is not None and area.widget().isAncestorOf(widget):
+                area.ensureWidgetVisible(widget)
+        widget.setFocus()
+
+    def _validate_custom_values(self) -> bool:  # on_change: blocks Save (False) on the first empty Custom value
+        found = self._find_empty_custom_field()
+        if found is None:
+            return True
+
+        widget, field_id = found
+        self._reveal_field(widget)
+        name = _clean_param_name(_schema_labels().get(field_id, "")) or field_id.rsplit(".", 1)[-1]
+        CustomMessageBox(
+            title="Error",
+            text=f"Error: The custom value for '{name}' cannot be empty.",
+            buttons=["OK"],
+            dialogType=MessageBoxType.Critical,
+        ).exec()
+        widget.setFocus()  # the message box takes focus away while it is open
+        return False
+
     def _save_inputs(self):  # on_change: validates all tabs then commits working_input_dict and emits CAD update signal
+
+        # Refuse to save while a "Custom" choice has no value typed in.
+        if not self._validate_custom_values():
+            return
 
         # Flush the currently-displayed stiffener member's widgets before committing.
         # _save_stiffener_member_data otherwise only runs when switching *away* from a
