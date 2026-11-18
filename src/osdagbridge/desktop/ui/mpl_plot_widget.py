@@ -24,9 +24,15 @@ from osdagbridge.core.bridge_types.plate_girder.plot_generator import (
     build_figure_grillage,
     _add_node_number_labels,
     _add_element_number_labels,
+    build_figure_transverse,
     FORCE_MAP,
     DISP_MAP,
 )
+from osdagbridge.core.bridge_types.plate_girder.results_data import (
+    get_transverse_member_results,
+    TRANSVERSE_LABEL_TO_TYPE,
+)
+from osdagbridge.core.utils.common import VALUES_TRANSVERSE_PLOT_MEMBERS
 
 # Forces starting with "F" -> shear (SFD); starting with "M" -> moment (BMD)
 _SFD_KEYS  = {k for k in FORCE_MAP if k.startswith("F")}
@@ -136,13 +142,13 @@ class SummaryOverlay(QFrame):
         self.text_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         layout.addWidget(self.text_label)
 
-    def update_data(self, summary_data, unit=""):
+    def update_data(self, summary_data, unit="", header="Girder"):
         title = "Extreme Values Summary"
         if unit:
             title += f" ({unit})"
         hud_text = f"<b>{title}</b><br>" + "-" * 38 + "<br>"
 
-        h_girder = "Girder".ljust(8).replace(" ", "&nbsp;")
+        h_girder = header.ljust(8).replace(" ", "&nbsp;")
         h_max = "Max".rjust(10).replace(" ", "&nbsp;")
         h_min = "Min".rjust(12).replace(" ", "&nbsp;")
         
@@ -336,6 +342,7 @@ class MplPlotWidget(QWidget):
             self._disconnect_output_dock_signals()
 
         self._ds_all    = None
+        self._result_data = None
         self._loadcases = []
         self._nodes     = {}
         self._members   = {}
@@ -407,8 +414,10 @@ class MplPlotWidget(QWidget):
                     pass
 
     def setup(self, ds_all, loadcases: list, nodes: dict, members: dict,
-              edge_dist: float = 0.0):
+              edge_dist: float = 0.0, result_data: dict | None = None):
         self._ds_all    = ds_all
+        # Flat result dict (results_data.restructure_data): source of the transverse-member plots
+        self._result_data = result_data
         self._loadcases = list(loadcases)
         self._nodes     = nodes
         self._members   = members
@@ -538,7 +547,15 @@ class MplPlotWidget(QWidget):
 
         # (Your existing if/elif/else block to build the new figures)
         eng_scale = self._eng_scale
-        if force_key in _SFD_KEYS:
+        is_transverse = sel_girder in VALUES_TRANSVERSE_PLOT_MEMBERS
+        if is_transverse:
+            # End Diaphragm / Cross Bracing: tags and values come from results_data (not the girder lookup)
+            self._fig, self._summary_data = build_figure_transverse(
+                get_transverse_member_results(getattr(self, "_result_data", None), loadcase),
+                TRANSVERSE_LABEL_TO_TYPE[sel_girder], force_key, self._nodes, self._members,
+                edge_dist=self._edge_dist, eng_scale=eng_scale,
+            )
+        elif force_key in _SFD_KEYS:
             self._fig, self._summary_data = build_figure_sfd(
                 ds, force_key, self._nodes, self._members,
                 edge_dist=self._edge_dist, eng_scale=eng_scale,
@@ -574,6 +591,7 @@ class MplPlotWidget(QWidget):
             self._summary_overlay.update_data(
                 self._summary_data,
                 unit=self._value_unit_for_force_key(force_key),
+                header="Member" if is_transverse else "Girder",
             )
             if self._is_summary_checked:
                 self._summary_overlay.show()
@@ -716,6 +734,8 @@ class MplPlotWidget(QWidget):
                 old_azim = self._fig.axes[0].azim
             plt.close(self._fig)
             sel_girder = self._current_member()
+            if sel_girder in VALUES_TRANSVERSE_PLOT_MEMBERS:
+                sel_girder = "All"   # the grillage view has no per-transverse-member highlight
             self._fig = build_figure_grillage(self._nodes, self._members, edge_dist=self._edge_dist, selected_girder=sel_girder)
             self._attach_figure(self._fig)
             if self._fig.axes and old_elev is not None and old_azim is not None:
