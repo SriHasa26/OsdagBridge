@@ -1428,6 +1428,9 @@ VALUES_CROSS_BRACING_TYPE = [
     "X-Bracing",
 ]
 VALUES_END_DIAPHRAGM_TYPE = ["Cross Bracing", "Rolled Beam", "Welded Beam"]
+# Transverse members offered after the girders in the analysis-plot member dropdown.
+# Order is paired with results_data.TRANSVERSE_LABEL_TO_TYPE.
+VALUES_TRANSVERSE_PLOT_MEMBERS = ["End Diaphragm", "Cross Bracing"]
 VALUES_WEARING_COAT_MATERIAL = ["Concrete", "Bituminous", "Custom"]
 VALUES_RAILING_TYPE = ["IRC 5 - RCC Railing", "IRC 5 - Steel Railing", "Custom"]
 VALUES_CUSTOM_AXLE_TYPE = ["Single", "Bogie"]

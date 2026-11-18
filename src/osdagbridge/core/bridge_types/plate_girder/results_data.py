@@ -16,7 +16,18 @@ from pathlib import Path
 
 import openseespy.opensees as ops
 
+from osdagbridge.core.utils.common import VALUES_TRANSVERSE_PLOT_MEMBERS
 from .results_data_post_processing import post_process, FORCE_KEEP, DISP_KEEP
+
+# Transverse member types returned by get_transverse_member_results().
+TRANSVERSE_END_DIAPHRAGM = "end_diaphragm"
+TRANSVERSE_CROSS_BRACING = "cross_bracing"
+# Plot-dropdown label -> member type (VALUES_TRANSVERSE_PLOT_MEMBERS is ordered End Diaphragm, Cross Bracing)
+TRANSVERSE_LABEL_TO_TYPE = dict(
+    zip(VALUES_TRANSVERSE_PLOT_MEMBERS, (TRANSVERSE_END_DIAPHRAGM, TRANSVERSE_CROSS_BRACING))
+)
+# Key under which the girder (longitudinal) element tags are reported, kept apart from the members above.
+LONGITUDINAL_TAGS = "longitudinal_tags"
 
 
 class LazyLoadcaseResults(Mapping):
@@ -507,6 +518,82 @@ def _build_full_data(model, edge_dist: float = 0.0, dataset=None, lazy: bool = F
             }
 
     return data
+
+
+def get_transverse_member_results(result_data: dict, loadcase: str) -> dict:
+    """
+    Internal forces and displacements of the transverse members for one load case.
+
+    ``result_data`` is the dict returned by ``restructure_data`` (``analyser.get_result_data``);
+    it must contain ``girders``, ``end_diaphragms`` and ``crossbracings`` from ``post_process``.
+
+    Tag separation (OpenSeesPy element tags, all ints):
+      * longitudinal: every element of the girders G1..Gn  -> ``LONGITUDINAL_TAGS``
+      * end diaphragm: ospgrillage ``start_edge`` + ``end_edge`` members between two girders
+      * cross bracing: ospgrillage ``transverse_slab`` members between two girders
+    A tag is reported in at most one place: girder tags are never transverse, and a tag already
+    taken as an end diaphragm is not repeated as cross bracing.
+
+    Returns::
+
+        {
+          "longitudinal_tags": [tag, ...],
+          "end_diaphragm": {tag: member, ...},
+          "cross_bracing": {tag: member, ...},
+        }
+
+    where ``member`` is::
+
+        {
+          "nodes":        (node_i, node_j),
+          "coords":       ((x, y, z), (x, y, z)),       # metres, global axes
+          "girder_pair":  ("G1", "G2"),
+          "forces":       {"Vx_i": N, ..., "Mz_j": N*m},  # FORCE_KEEP components, as in the dataset
+          "displacements": {"i": {"x": m, ..., "theta_z": rad}, "j": {...}},
+        }
+
+    Both member dicts are empty if the load case has no results (or nothing was analysed yet).
+    """
+    out = {LONGITUDINAL_TAGS: [], TRANSVERSE_END_DIAPHRAGM: {}, TRANSVERSE_CROSS_BRACING: {}}
+    if not result_data:
+        return out
+
+    girder_tags = {
+        int(m) for girder in result_data.get("girders", {}).values() for m in girder.get("members", [])
+    }
+    out[LONGITUDINAL_TAGS] = sorted(girder_tags)
+
+    lc = str(loadcase)
+    forces, displacements = result_data.get("forces", {}), result_data.get("displacements", {})
+    if lc not in forces:
+        return out
+    lc_forces = forces[lc]
+    lc_disp = displacements[lc] if lc in displacements else {}
+    members, nodes = result_data.get("members", {}), result_data.get("nodes", {})
+
+    taken = set(girder_tags)
+    # End diaphragms first so that no tag can be listed under both transverse types.
+    for member_type, source in ((TRANSVERSE_END_DIAPHRAGM, "end_diaphragms"),
+                                (TRANSVERSE_CROSS_BRACING, "crossbracings")):
+        for chain in result_data.get(source, []):
+            for tag in chain.get("members", []):
+                tag_int = int(tag)
+                tag_forces = lc_forces.get(str(tag_int)) if tag_int not in taken else None
+                if tag_forces is None:
+                    continue
+                node_i, node_j = members[str(tag_int)]
+                out[member_type][tag_int] = {
+                    "nodes": (node_i, node_j),
+                    "coords": (tuple(nodes[str(node_i)]), tuple(nodes[str(node_j)])),
+                    "girder_pair": (chain.get("left_girder"), chain.get("right_girder")),
+                    "forces": dict(tag_forces),
+                    "displacements": {
+                        "i": dict(lc_disp.get(str(node_i), {})),
+                        "j": dict(lc_disp.get(str(node_j), {})),
+                    },
+                }
+                taken.add(tag_int)
+    return out
 
 
 def _dump_crossbracing(data: dict) -> None:
