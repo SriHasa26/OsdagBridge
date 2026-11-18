@@ -362,6 +362,15 @@ def attach_crossbracings(data, member_ids, members_dict, node_coords):
     )
 
 
+def attach_end_diaphragms(data, member_ids, members_dict, node_coords):
+    # End diaphragms are the ospgrillage start_edge + end_edge members. Same rule and
+    # record shape as the cross bracings (only members spanning two girders are kept),
+    # which is also what PlateGirderBridge._design_end_diaphragm_members uses.
+    data["end_diaphragms"] = build_crossbracings(
+        member_ids, members_dict, node_coords, data.get("girders", {})
+    )
+
+
 # ---------------- POST PROCESS ---------------- #
 
 OUTPUT_KEYS = [
@@ -373,6 +382,7 @@ OUTPUT_KEYS = [
     "transverse_members",
     "girders",
     "crossbracings",
+    "end_diaphragms",
     "forces",
     "displacements",
     "force_components",
@@ -390,6 +400,12 @@ def post_process(data: dict) -> dict:
         data.get("groups", {}).get("transverse_slab")
         or data.get("transverse_slab")
         or []
+    )
+
+    # start_edge / end_edge are not in GROUP_KEYS, so they stay in data["groups"] untouched
+    ed_raw_ids = (
+        list(data.get("groups", {}).get("start_edge") or [])
+        + list(data.get("groups", {}).get("end_edge") or [])
     )
 
     for group in GROUP_KEYS:
@@ -433,5 +449,6 @@ def post_process(data: dict) -> dict:
     rebuild_components(data)
     attach_girders(data)
     attach_crossbracings(data, cb_raw_ids, members_dict, node_coords)
+    attach_end_diaphragms(data, ed_raw_ids, members_dict, node_coords)
 
     return {k: data[k] for k in OUTPUT_KEYS if k in data}
