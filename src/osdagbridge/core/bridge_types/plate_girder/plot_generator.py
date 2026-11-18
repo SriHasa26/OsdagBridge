@@ -1589,9 +1589,11 @@ def build_figure_transverse(transverse, member_type, force_key, nodes, members,
     member_type : results_data.TRANSVERSE_END_DIAPHRAGM / TRANSVERSE_CROSS_BRACING
     force_key   : "Fx".."Mz" (internal force, see TRANSVERSE_FORCE_MAP) or "Dx"/"Dy"/"Dz"
 
-    Same drawing conventions as the girder plots: forces in kN / kN*m, the j-end shear is
-    sign-flipped (SFD), positive moment plots downward (BMD), displacements in mm with the
-    vertical sag sign flip. Returns (figure, summary) like build_figure_sfd.
+    Same drawing conventions as the girder plots: forces in kN / kN*m with the j-end value
+    sign-flipped (end force -> internal force), positive moment plotted downward (BMD),
+    displacements in mm with the vertical sag sign flip. Returns (figure, summary) like
+    build_figure_sfd. In a flat grillage axial force and torsion of a transverse member are ~0,
+    so those diagrams are flat.
     """
     member_label = member_type.replace("_", " ").title()
     members_data = (transverse or {}).get(member_type, {})
@@ -1646,9 +1648,10 @@ def build_figure_transverse(transverse, member_type, force_key, nodes, members,
             comp_i, comp_j = TRANSVERSE_FORCE_MAP[force_key]
             if comp_i not in m["forces"] or comp_j not in m["forces"]:
                 continue
-            v1, v2 = m["forces"][comp_i] / 1000.0, m["forces"][comp_j] / 1000.0
-            if not is_moment:
-                v2 = -v2   # SFD convention: flip the j-end so a member without load gives a flat diagram
+            # The j-end value is the end force acting on the element; flip it to get the internal force.
+            # Shear then comes out flat for an unloaded member and the moment at a girder equals the
+            # next element's i-end value (Mx_i(next) == -Mx_j(prev) in the analysis output).
+            v1, v2 = m["forces"][comp_i] / 1000.0, -m["forces"][comp_j] / 1000.0
         segments.append((x1, z1, x2, z2, round(v1, 3), round(v2, 3), tag))
     if not segments:
         return _message_figure(f"No {member_label} results for this load case")
