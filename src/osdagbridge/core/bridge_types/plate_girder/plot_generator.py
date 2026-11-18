@@ -1552,6 +1552,166 @@ def build_figure_deflection(ds, disp_key, nodes, members, edge_dist=0.0, eng_sca
     return fig, summary_data
 
 
+# =============================================================================
+# TRANSVERSE MEMBERS (End Diaphragm / Cross Bracing)
+# =============================================================================
+
+# The output-dock symbols (F_x, V_y, V_z, T_x, M_y, M_z) name the *girder's* local quantities
+# (axial, vertical shear, ..., torsion, ..., bending). A transverse member runs along the global Z
+# axis, so the same quantity lives in a different dataset component; this maps the dock symbol to
+# the (i-end, j-end) component of the transverse member. Switch the convention here only.
+TRANSVERSE_FORCE_MAP = {
+    "Fx": ("Vz_i", "Vz_j"),   # axial force (along the member, global Z)
+    "Fy": ("Vy_i", "Vy_j"),   # vertical shear
+    "Fz": ("Vx_i", "Vx_j"),   # in-plane shear
+    "Mx": ("Mz_i", "Mz_j"),   # torsion (about the member axis)
+    "My": ("My_i", "My_j"),   # bending about the vertical axis
+    "Mz": ("Mx_i", "Mx_j"),   # bending from vertical loads
+}
+
+
+def _message_figure(text):
+    """Empty 3-D figure carrying one message (keeps the plot widget's 3-D handling happy)."""
+    fig = Figure(figsize=(14, 6), dpi=110, facecolor="white")
+    ax = fig.add_subplot(111, projection="3d", facecolor="white")
+    ax.set_axis_off()
+    ax.text2D(0.5, 0.5, text, transform=ax.transAxes, ha="center", va="center",
+              fontsize=13, color="#455A64")
+    return fig, {}
+
+
+def build_figure_transverse(transverse, member_type, force_key, nodes, members,
+                            edge_dist=0.0, eng_scale=1.0):
+    """
+    3-D diagram of one transverse member type for one load case.
+
+    transverse  : results_data.get_transverse_member_results(...) for the load case
+    member_type : results_data.TRANSVERSE_END_DIAPHRAGM / TRANSVERSE_CROSS_BRACING
+    force_key   : "Fx".."Mz" (internal force, see TRANSVERSE_FORCE_MAP) or "Dx"/"Dy"/"Dz"
+
+    Same drawing conventions as the girder plots: forces in kN / kN*m, the j-end shear is
+    sign-flipped (SFD), positive moment plots downward (BMD), displacements in mm with the
+    vertical sag sign flip. Returns (figure, summary) like build_figure_sfd.
+    """
+    member_label = member_type.replace("_", " ").title()
+    members_data = (transverse or {}).get(member_type, {})
+    if not members_data or not nodes:
+        return _message_figure(f"No {member_label} results for this load case")
+
+    v_scale = _value_plot_scale(eng_scale)
+    is_disp = force_key in DISP_MAP
+    is_moment = force_key.startswith("M")
+    if is_disp:
+        disp_key, unit = DISP_DISPLAY.get(force_key, force_key), "mm"
+        line_color, fill_color = "#6A1B9A", None
+        disp_comp = {"Dx": "x", "Dy": "y", "Dz": "z"}[force_key]
+    elif is_moment:
+        disp_key, unit = FORCE_DISPLAY.get(force_key, force_key), "kNm"
+        line_color, fill_color = "#C62828", "#EF9A9A"
+    else:
+        disp_key, unit = FORCE_DISPLAY.get(force_key, force_key), "kN"
+        line_color, fill_color = "#1565C0", "#90CAF9"
+
+    fig = Figure(figsize=(14, 6), dpi=110, facecolor="white")
+    ax = fig.add_subplot(111, projection="3d", facecolor="white")
+
+    all_xs = [coord[0] for coord in nodes.values()]
+    all_zs = [coord[2] for coord in nodes.values()]
+    x_range = max(all_xs) - min(all_xs) or 1.0
+    z_range = max(all_zs) - min(all_zs) or 1.0
+    x_pad = (max(all_xs) - min(all_xs)) * 0.05 or 1.0
+    z_pad = (max(all_zs) - min(all_zs)) * 0.05 or 1.0
+    ax.set_xlim(min(all_xs) - x_pad, max(all_xs) + x_pad)
+    ax.set_ylim(min(all_zs) - z_pad, max(all_zs) + z_pad)
+    ax.set_box_aspect([x_range, z_range, x_range * 0.30])
+
+    # faint girder lines as background, like the girder plots
+    _add_grillage_background(
+        ax, nodes, members,
+        show_transverse=False, include_edge_longitudinals=False,
+        include_end_transverse=False, show_inner_nodes=False,
+    )
+
+    # (x1, z1, x2, z2, v1, v2, tag) per member; v in plot units (kN, kNm or mm)
+    segments = []
+    for tag, m in sorted(members_data.items()):
+        (x1, _, z1), (x2, _, z2) = m["coords"]
+        if is_disp:
+            ends = [m["displacements"][end].get(disp_comp) for end in ("i", "j")]
+            if None in ends:
+                continue
+            sign = -1.0 if disp_comp in ("y", "z") else 1.0   # vertical sag sign flip, as the girder plot
+            v1, v2 = (sign * e * 1000.0 for e in ends)
+        else:
+            comp_i, comp_j = TRANSVERSE_FORCE_MAP[force_key]
+            if comp_i not in m["forces"] or comp_j not in m["forces"]:
+                continue
+            v1, v2 = m["forces"][comp_i] / 1000.0, m["forces"][comp_j] / 1000.0
+            if not is_moment:
+                v2 = -v2   # SFD convention: flip the j-end so a member without load gives a flat diagram
+        segments.append((x1, z1, x2, z2, round(v1, 3), round(v2, 3), tag))
+    if not segments:
+        return _message_figure(f"No {member_label} results for this load case")
+
+    plot_sign = -1.0 if is_moment else 1.0   # BMD convention: positive moment plots downward
+    global_vmin = global_vmax = 0.0
+    for x1, z1, x2, z2, v1, v2, tag in segments:
+        xs, zs = np.array([x1, x2]), np.array([z1, z2])
+        y_plot = plot_sign * np.array([v1, v2]) * v_scale
+        global_vmin = min(global_vmin, float(np.min(y_plot)))
+        global_vmax = max(global_vmax, float(np.max(y_plot)))
+
+        ax.scatter(xs, zs, np.zeros(2), color="#388E3C", s=5, zorder=4, depthshade=False, alpha=0.4)
+        if fill_color is not None:
+            ax.plot_surface(np.vstack([xs, xs]), np.vstack([zs, zs]), np.vstack([np.zeros(2), y_plot]),
+                            color=fill_color, alpha=0.25, linewidth=0, antialiased=False, zorder=2)
+        ax.plot(xs, zs, y_plot, color=line_color, linewidth=2.0, zorder=4)
+        ax.scatter(xs, zs, y_plot, color=line_color, s=20, zorder=5, depthshade=False)
+        for x, z, y, v in zip(xs, zs, y_plot, (v1, v2)):
+            if abs(v) > 1e-4:
+                ax.text(x, z, y, f" {v:.3f} {unit}", color="#455A64", fontsize=7, zorder=6, gid="all_vals",
+                        bbox=dict(boxstyle="round,pad=0.1", facecolor="white", alpha=0.7, edgecolor="none"))
+
+    # global extremes over all members of this type (same gids as the girder plots -> toolbar toggles work)
+    all_vals = [(v, x, z, plot_sign * v * v_scale) for x1, z1, x2, z2, v1, v2, _ in segments
+                for v, x, z in ((v1, x1, z1), (v2, x2, z2))]
+    v_max = max(all_vals, key=lambda t: t[0])
+    v_min = min(all_vals, key=lambda t: t[0])
+    for (v, x, z, y), color, va, ha, gid in ((v_max, "black", "bottom", "left", "max_line"),
+                                             (v_min, "black", "top", "right", "min_line")):
+        ax.plot([x], [z], [y], marker="o", markersize=9, color=color, markeredgecolor="white",
+                markeredgewidth=1.5, linestyle="None", zorder=10, gid=gid)
+        ax.text(x, z, y, f" {v:.3f} {unit}", color=color, fontsize=7, fontweight="bold", ha=ha, va=va,
+                zorder=11, gid=gid, bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8, edgecolor="none"))
+
+    _add_supports(ax, nodes, members, edge_dist=edge_dist, selected_girder="All")
+    _add_node_number_labels(ax, nodes)
+    _add_element_number_labels(ax, nodes, members)   # hidden by default; toggled by toolbar
+    ax.set_xlabel("Span Length (m)", fontsize=10, labelpad=8)
+    ax.set_ylabel("Bridge Width (m)", fontsize=10, labelpad=8)
+    ax.set_zlabel(f"{disp_key} ({unit})", fontsize=10, labelpad=8)
+    _set_value_axis_tick_formatter(ax, v_scale, value_sign=plot_sign)
+    zmin, zmax = min(0.0, global_vmin), max(0.0, global_vmax)
+    pad = max(1e-6, 0.05 * max(1e-9, zmax - zmin))
+    ax.set_zlim(zmin - pad, zmax + pad)
+    ax.set_box_aspect([x_range, z_range, (x_range * 0.30) * max(v_scale, 1e-6)])
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=4, steps=[1, 2, 2.5, 5, 10]))
+    ax.set_title(f"{member_label}  —  {disp_key} ({unit})", fontsize=12, fontweight="bold", pad=12)
+    fig._eng_scale = v_scale
+    ax.view_init(elev=DEFAULT_ELEV, azim=DEFAULT_AZIM)
+    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+        axis.pane.fill = False
+        axis.pane.set_edgecolor("#555555")
+        axis.pane.set_linewidth(1.5)
+        axis.pane.set_alpha(1.0)
+    ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.5)
+    _add_coordinate_triad(ax, nodes, eng_scale=v_scale)
+    ax.set_axis_off()
+
+    summary_data = {member_label: {"max": float(v_max[0]), "min": float(v_min[0])}}
+    return fig, summary_data
+
+
 def figure_to_bytes(fig, fmt="png", dpi=150):
     """Convenience helper — render a matplotlib figure to raw bytes."""
     buf = io.BytesIO()
