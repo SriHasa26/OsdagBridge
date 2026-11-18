@@ -17,7 +17,9 @@ from osdagbridge.desktop.ui.dialogs.loading_popup import LoadingDialogManager
 from osdagbridge.desktop.ui.cad_3d import CAD3DWindow
 
 from osdagbridge.core.bridge_types.plate_girder.ui_fields import FrontendData
-from osdagbridge.core.bridge_types.plate_girder.defaults import BASIC_INPUT_DICT, solve_extend_basic_input_dict
+from osdagbridge.core.bridge_types.plate_girder.defaults import (
+    BASIC_INPUT_DICT, solve_extend_basic_input_dict, apply_cad_parameter_edit,
+)
 from osdagbridge.core.utils.common import *
 from osdagbridge.core.utils.osi_validator import validate_osi_inputs
 from osdagbridge.core.utils.logger import bridge_logger
@@ -412,6 +414,7 @@ class CustomWindow(QWidget):
         
         # Connect input dock changes to CAD widget for real-time updates
         self.setup_cad_connections()
+        self._setup_cad_editing()
         
         # Initial CAD update to sync with starting UI values (e.g., footpath=None)
         self.update_cad_from_inputs()
@@ -789,6 +792,63 @@ class CustomWindow(QWidget):
         if hasattr(self.input_dock, 'input_value_changed'):
             self.input_dock.input_value_changed.connect(self.update_cad_from_inputs)        
             
+    #-------2D-CAD-Inline-Editing-START----------------------------------------
+
+    def _setup_cad_editing(self):
+        """Turn on double-click editing of the dimension labels on both 2D CAD canvases."""
+        for canvas in (self.cad_comp_widget.cross_section_widget, self.cad_comp_widget.top_view_widget):
+            canvas.inline_edit_enabled = True
+            # No editing while the inputs are locked: the results on screen belong to them.
+            canvas.inline_edit_guard = lambda: not self.input_dock.is_locked
+            canvas.parameter_edited.connect(self._on_cad_parameter_edited)
+
+    def _on_cad_parameter_edited(self, key: str, text: str):
+        """
+        Slot for a value typed into a dimension label on the 2D CAD (see cad_inline_edit.py).
+        Validate -> update input_dict and derived values -> mirror into the InputDock field and the
+        Additional Inputs dialog -> redraw. If anything is wrong the standard Error dialog is shown
+        and nothing is written, so the old value stays.
+        """
+        is_basic = key in (KEY_SPAN, KEY_CARRIAGEWAY_WIDTH)   # input-dock fields; the rest are Additional Inputs
+        validator = self.input_dock.validator if is_basic else self._get_additional_inputs().validator
+        validate = validator.validate_basic_inputs if is_basic else validator.validate_additional_inputs
+
+        # Validate on a copy: a rejected value must never reach input_dict.
+        trial = dict(self.input_dict)
+        trial[key] = text
+        check = validate(key, trial)
+        error = check[1] if check is not None else None
+        if error is None and key == KEY_TS_GIRDER_SPACING and not self.input_dict.get(KEY_CARRIAGEWAY_WIDTH):
+            error = "Enter the Carriageway Width in the input dock first."   # layout cannot be solved without it
+
+        if error is None:
+            text = f"{float(text):g}"   # "10.50" -> "10.5", like a number typed in the dock
+            try:
+                changed = apply_cad_parameter_edit(self.input_dict, key, text)
+            except (ValueError, TypeError) as exc:
+                error = str(exc)
+        if error is not None:
+            CustomMessageBox(title="Input Error", text=error, dialogType=MessageBoxType.Critical).exec()
+            return
+
+        if is_basic:
+            field = self.input_dock.input_widget.findChild(QLineEdit, key)
+            if field is not None:
+                field.blockSignals(True)   # input_dict is already up to date
+                field.setText(text)
+                field.blockSignals(False)
+                self.input_dock.reset_error_state(field)
+
+        # Keep the dialog's working copy in step (it is reloaded from input_dict on every open anyway).
+        dlg = self._additional_inputs_dialog
+        if dlg is not None and dlg.working_input_dict:
+            dlg.working_input_dict.update({k: self.input_dict[k] for k in changed})
+
+        # force: skip the "changed only" cache, so the redraw never misses this edit
+        self.cad_comp_widget.update_from_osdag_inputs(self.input_dict, force=True)
+
+    #-------2D-CAD-Inline-Editing-END------------------------------------------
+
     # Function for saving input dictionary into an OSI file
     def saveOSI_inputs(self):
         # Populate additional input defaults so they appear in the saved file

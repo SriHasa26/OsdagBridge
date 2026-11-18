@@ -147,7 +147,7 @@ class BridgeDualCADWidget(QWidget):
         )
         self.top_view_widget.update()
     
-    def update_from_osdag_inputs(self, input_dict):
+    def update_from_osdag_inputs(self, input_dict, force=False):
         """
         Update CAD from OsdagBridge input fields
         Maps from OsdagBridge common.py KEY_* fields to CAD widget parameters
@@ -322,9 +322,11 @@ class BridgeDualCADWidget(QWidget):
                             params[KEY_MD_HEIGHT] = geom["barrier_height"]
         
         # Propagate only keys that actually changed to avoid unnecessary redraw/zoom resets.
+        # force=True (2D CAD inline edits) pushes everything: the canvases can hold values that
+        # were set directly (Additional Inputs Save) and so differ from this cache.
         changed_params = {
             k: v for k, v in params.items()
-            if self._last_mapped_params.get(k) != v
+            if force or self._last_mapped_params.get(k) != v
         }
         if not changed_params:
             return
