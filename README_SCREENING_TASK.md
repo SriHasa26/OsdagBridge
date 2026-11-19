@@ -91,6 +91,11 @@ Each run is limited by a watchdog (60 s; `verify_task3` waits up to 15 minutes f
 the checks). `verify_task3` compares `post_process` with the version from commit `d74f56d` (needs the git history).
 Results on this branch: `verify_task1` 62/62, `verify_task2` 28/28, `verify_task3` 40/40 checks pass.
 
+`tools/screening/demo_walkthrough.py` records a silent walkthrough video of the three subtasks. It drives the real window
+with on-screen captions, grabs the usable screen at about 10 fps (only while a window of the application is active) and
+encodes it with ffmpeg (`--ffmpeg PATH`, `$FFMPEG_EXE`, `imageio-ffmpeg` or `PATH`). It takes about 10 minutes because of the
+design run; leave the mouse and keyboard alone while it runs. `--quick` skips the design and the plots.
+
 ## Assumptions and design decisions
 
 | # | Question | Decision |
