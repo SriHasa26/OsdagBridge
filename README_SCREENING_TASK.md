@@ -92,9 +92,10 @@ the checks). `verify_task3` compares `post_process` with the version from commit
 Results on this branch: `verify_task1` 62/62, `verify_task2` 28/28, `verify_task3` 40/40 checks pass.
 
 `tools/screening/demo_walkthrough.py` records a silent walkthrough video of the three subtasks. It drives the real window
-with on-screen captions, grabs the usable screen at about 10 fps (only while a window of the application is active) and
-encodes it with ffmpeg (`--ffmpeg PATH`, `$FFMPEG_EXE`, `imageio-ffmpeg` or `PATH`). It takes about 10 minutes because of the
-design run; leave the mouse and keyboard alone while it runs. `--quick` skips the design and the plots.
+with on-screen captions and composes each frame (about 10 per second) from the application's own windows only: the main
+window with its dialogs, popups and the caption drawn on top. Nothing else on the screen can appear in the video, and the
+window may be covered while it records. The frames are encoded with ffmpeg (`--ffmpeg PATH`, `$FFMPEG_EXE`,
+`imageio-ffmpeg` or `PATH`). It takes about 10 minutes because of the design run; `--quick` skips the design and the plots.
 
 ## Assumptions and design decisions
 
