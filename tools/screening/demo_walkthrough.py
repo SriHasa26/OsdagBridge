@@ -2,10 +2,11 @@
 
     python tools/screening/demo_walkthrough.py [--out demo.mp4] [--ffmpeg PATH] [--keep-frames] [--quick]
 
-Drives the REAL visible application with readable pauses and on-screen captions, grabs the whole
-screen (QScreen.grabWindow(0), so dialogs are included) at ~10 fps into a temp folder and encodes the
-frames to H.264 with ffmpeg. The ~5 minute design wait is recorded at a very low frame rate and
-played back fast. Takes about 10 minutes; do not touch the mouse/keyboard and keep the screen on.
+Drives the REAL application with readable pauses and on-screen captions. Each frame is composed from the
+application's own windows only (main window + dialogs, popups and the caption drawn on top of it), so no other
+application or notification can appear in the video and the window may be covered while it records. Frames go to a
+temp folder and are encoded to H.264 with ffmpeg. The ~5 minute design wait is recorded at a very low frame rate
+and played back fast. Takes about 10 minutes.
 
 ffmpeg is taken from --ffmpeg, $FFMPEG_EXE, the imageio-ffmpeg package or PATH (in that order).
 """
@@ -41,8 +42,8 @@ def find_ffmpeg():
 def main():
     from collections import deque
 
-    from PySide6.QtCore import QObject, Qt, QTimer
-    from PySide6.QtGui import QFont
+    from PySide6.QtCore import QObject, QPoint, Qt, QTimer
+    from PySide6.QtGui import QFont, QPainter
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QScrollArea
 
@@ -73,7 +74,7 @@ def main():
     class Recorder(QObject):
         def __init__(self):
             super().__init__()
-            self.frames, self.fast, self.skipped = [], False, 0
+            self.frames, self.fast = [], False
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.grab)
 
@@ -85,15 +86,33 @@ def main():
             self.timer.setInterval(4000 if fast else 100)
 
         def grab(self):
-            if QApplication.activeWindow() is None:   # another application is in front: never record it
-                self.skipped += 1
+            """Render the main window and every visible top-level widget of THIS application on top of it.
+
+            Nothing outside the application (other windows, notifications) can end up in the video, and
+            it works while the window is covered by something else.
+            """
+            main = holder.get("window")
+            if main is None:
                 return
+            canvas = main.grab()
+            painter = QPainter(canvas)
+            origin = main.mapToGlobal(QPoint(0, 0))
+
+            def z_order(w):
+                if w is caption:
+                    return 3
+                if isinstance(w, CustomMessageBox) or w.metaObject().className() == "QTipLabel":
+                    return 2
+                return 1
+            tops = [w for w in QApplication.topLevelWidgets() if w.isVisible() and w is not main and w.width() > 1]
+            for w in sorted(tops, key=z_order):
+                painter.drawPixmap(w.mapToGlobal(QPoint(0, 0)) - origin, w.grab())
+            painter.end()
             path = frames_dir / f"f{len(self.frames):06d}.jpg"
-            geo = screen.availableGeometry()   # the usable screen: no taskbar in the video
-            pm = screen.grabWindow(0, geo.x(), geo.y(), geo.width(), geo.height())
-            pm.save(str(path), "JPG", 75)      # full size here, ffmpeg scales (faster capture)
+            canvas.save(str(path), "JPG", 75)      # full size here, ffmpeg scales
             self.frames.append((path, time.time(), self.fast))
 
+    holder = {}
     rec = Recorder()
 
     # ── caption overlay (a small always-on-top label; it ends up in the screen grabs) ─────────
@@ -114,25 +133,10 @@ def main():
         caption.raise_()
         QTest.qWait(50)
 
-    def ensure_front():
-        if QApplication.activeWindow() is None and "window" in holder:   # nothing of ours is active
-            win = holder["window"]
-            win.showMaximized()
-            win.raise_()
-            win.activateWindow()
-            try:    # Windows may refuse plain activateWindow() from a background process
-                import ctypes
-                ctypes.windll.user32.SetForegroundWindow(int(win.winId()))
-            except Exception:
-                pass
-
-    holder = {}
-
     def hold(seconds):
         end = time.time() + seconds
         while time.time() < end:
             QTest.qWait(200)
-            ensure_front()
 
     # ── auto-click the REAL dialogs after a readable pause ────────────────────────────────────
     class AutoDialog(QObject):
@@ -355,7 +359,7 @@ def main():
     cmd = [ffmpeg, "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(listing),
            "-vf", f"fps=10,scale={FRAME_WIDTH}:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out_mp4)]
-    print("encoding", len(frames), "frames (skipped while another app was in front:", rec.skipped, ") ->", out_mp4, flush=True)
+    print("encoding", len(frames), "frames ->", out_mp4, flush=True)
     subprocess.check_call(cmd)
     if "--keep-frames" not in sys.argv:
         shutil.rmtree(frames_dir, ignore_errors=True)
